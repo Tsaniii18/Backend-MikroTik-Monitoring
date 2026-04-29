@@ -30,7 +30,6 @@ export class Poller {
 
   async stop() {
     this.isRunning = false;
-    // Wait for current loop iteration to finish gracefully
     if (this.loopPromise) {
       await this.loopPromise;
       this.loopPromise = null;
@@ -49,12 +48,9 @@ export class Poller {
   async runLoop() {
     while (this.isRunning) {
       const start = Date.now();
-      
-      // Run all polling tasks sequentially
       await this.pollResource();
       await this.pollPing();
       await this.pollInterfaces();
-      
       const elapsed = Date.now() - start;
       const delay = Math.max(0, CONFIG.pollingIntervalMs - elapsed);
       if (delay > 0 && this.isRunning) {

@@ -41,7 +41,7 @@ export class RuleEngine {
       if (!event || event.status === 'ended') {
         const topTasks = await this.mikrotik.topCpuTasks();
         const evidence = {
-          cpu_at_trigger: stats.avg,
+          cpu_at_trigger: stats.current,
           cpu_avg_prev_60s: stats.avg,
           top_tasks_at_trigger: topTasks
         };
@@ -98,8 +98,7 @@ export class RuleEngine {
     if (active) {
       if (!event || event.status === 'ended') {
         const evidence = {
-          delay_at_trigger: { avg: stats.avg, min: stats.min, max: stats.max },
-          delay_avg_prev_60s: stats.avg
+          delay_prev_60s: { avg: stats.avg, min: stats.min, max: stats.max }
         };
         event = await this.models.Event.create({
           routerName, routerIp,
@@ -154,10 +153,12 @@ export class RuleEngine {
     if (active) {
       if (!event || event.status === 'ended') {
         const evidence = {
-          total_loss: plStats.totalLoss,
-          total_sent: plStats.totalSent,
-          total_received: plStats.totalReceived,
-          loss_percentage: plStats.lossPct,
+          packet_loss_prev_60s: {
+            total_loss: plStats.totalLoss,
+            total_sent: plStats.totalSent,
+            total_received: plStats.totalReceived,
+            loss_percentage: plStats.lossPct,
+          }
         };
         event = await this.models.Event.create({
           routerName, routerIp,

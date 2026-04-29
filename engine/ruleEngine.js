@@ -1,4 +1,4 @@
-import { LIB, RULES } from "./library.js";
+import { CONFIG, RULES } from "./library.js";
 
 export class RuleEngine {
   constructor(models, mikrotik, poller = null) {
@@ -25,8 +25,7 @@ export class RuleEngine {
     this.initialUp.set(routerIp, up);
   }
 
-  async onCpuData(routerName, routerIp, data) {
-    const { value, timestamp } = data;
+  async onCpuData(routerName, routerIp, stats, timestamp) {
     const type = RULES.R4.type;
     const key = `${routerIp}:${type}`;
     let event = this.cache.get(key) || await this.models.Event.findOne({
@@ -36,17 +35,14 @@ export class RuleEngine {
     if (event) this.cache.set(key, event);
     const now = new Date(timestamp);
 
-    const since = timestamp - 60000;
-    const cpuData = this.poller?.getWindowData('cpu', since) || [];
-    const avg = cpuData.length ? cpuData.reduce((s, d) => s + d.loadPct, 0) / cpuData.length : 0;
-    const active = cpuData.length >= LIB.windows.cpu.max && avg >= LIB.thresholds.cpuAvgPct;
+    const active = stats.count >= CONFIG.windowsLength && stats.avg >= RULES.R4.threshold;
 
     if (active) {
       if (!event || event.status === 'ended') {
         const topTasks = await this.mikrotik.topCpuTasks();
         const evidence = {
-          cpu_at_trigger: value,
-          cpu_avg_prev_60s: avg,
+          cpu_at_trigger: stats.avg,
+          cpu_avg_prev_60s: stats.avg,
           top_tasks_at_trigger: topTasks
         };
         event = await this.models.Event.create({
@@ -76,7 +72,7 @@ export class RuleEngine {
         if (event.status === 'active') {
           await event.update({
             status: 'cooldown',
-            cooldownUntil: new Date(now.getTime() + LIB.cooldownMs),
+            cooldownUntil: new Date(now.getTime() + CONFIG.eventCooldownMs),
             lastSeenAt: now
           });
         } else if (event.status === 'cooldown' && event.cooldownUntil && now >= event.cooldownUntil) {
@@ -87,8 +83,7 @@ export class RuleEngine {
     }
   }
 
-  async onLatencyData(routerName, routerIp, data) {
-    const { avgMs, minMs, maxMs, timestamp } = data;
+  async onDelayData(routerName, routerIp, stats, timestamp) {
     const type = RULES.R2.type;
     const key = `${routerIp}:${type}`;
     let event = this.cache.get(key) || await this.models.Event.findOne({
@@ -98,16 +93,13 @@ export class RuleEngine {
     if (event) this.cache.set(key, event);
     const now = new Date(timestamp);
 
-    const since = timestamp - 60000;
-    const delayData = this.poller?.getWindowData('delay', since) || [];
-    const avgPrev = delayData.length ? delayData.reduce((s, d) => s + d.avgMs, 0) / delayData.length : 0;
-    const active = delayData.length >= LIB.windows.ping.max && avgPrev >= LIB.thresholds.latencyAvgMs;
+    const active = stats.count >= CONFIG.windowsLength && stats.avg >= RULES.R2.threshold;
 
     if (active) {
       if (!event || event.status === 'ended') {
         const evidence = {
-          delay_at_trigger: { avg: avgMs, min: minMs, max: maxMs },
-          delay_avg_prev_60s: avgPrev
+          delay_at_trigger: { avg: stats.avg, min: stats.min, max: stats.max },
+          delay_avg_prev_60s: stats.avg
         };
         event = await this.models.Event.create({
           routerName, routerIp,
@@ -136,7 +128,7 @@ export class RuleEngine {
         if (event.status === 'active') {
           await event.update({
             status: 'cooldown',
-            cooldownUntil: new Date(now.getTime() + LIB.cooldownMs),
+            cooldownUntil: new Date(now.getTime() + CONFIG.eventCooldownMs),
             lastSeenAt: now
           });
         } else if (event.status === 'cooldown' && event.cooldownUntil && now >= event.cooldownUntil) {
@@ -147,8 +139,7 @@ export class RuleEngine {
     }
   }
 
-  async onPacketLossData(routerName, routerIp, data) {
-    const { lossPct, sent, received, timestamp, windowStats } = data;
+  async onPacketLossData(routerName, routerIp, plStats, timestamp) {
     const type = RULES.R3.type;
     const key = `${routerIp}:${type}`;
     let event = this.cache.get(key) || await this.models.Event.findOne({
@@ -158,19 +149,15 @@ export class RuleEngine {
     if (event) this.cache.set(key, event);
     const now = new Date(timestamp);
 
-    const avgPrev = windowStats?.avg ?? 0;
-    const windowCount = windowStats?.count ?? 0;
-    const active = windowCount >= LIB.windows.ping.max && avgPrev >= LIB.thresholds.packetLossAvgPct;
+    const active = plStats.count >= CONFIG.windowsLength && plStats.lossPct >= RULES.R3.threshold;
 
     if (active) {
       if (!event || event.status === 'ended') {
         const evidence = {
-          loss_avg_prev_60s: {
-            avg_loss_pct: avgPrev,
-            window_count: windowCount,
-            min_loss_pct: windowStats?.min ?? 0,
-            max_loss_pct: windowStats?.max ?? 0,
-          }
+          total_loss: plStats.totalLoss,
+          total_sent: plStats.totalSent,
+          total_received: plStats.totalReceived,
+          loss_percentage: plStats.lossPct,
         };
         event = await this.models.Event.create({
           routerName, routerIp,
@@ -199,7 +186,7 @@ export class RuleEngine {
         if (event.status === 'active') {
           await event.update({
             status: 'cooldown',
-            cooldownUntil: new Date(now.getTime() + LIB.cooldownMs),
+            cooldownUntil: new Date(now.getTime() + CONFIG.eventCooldownMs),
             lastSeenAt: now
           });
         } else if (event.status === 'cooldown' && event.cooldownUntil && now >= event.cooldownUntil) {
@@ -216,7 +203,7 @@ export class RuleEngine {
 
     const key = `prevStatus:${routerIp}`;
     let previousStatus = this.previousInterfaceStatus.get(key);
-    
+
     const currentStatus = new Map();
     for (const iface of interfaces) {
       const isUp = iface.status === 'up';
@@ -226,7 +213,7 @@ export class RuleEngine {
     if (previousStatus) {
       for (const [ifaceName, currentState] of currentStatus) {
         const prevState = previousStatus.get(ifaceName);
-        
+
         if (prevState && prevState.isUp && !currentState.isUp) {
           const lockKey = `interface:${routerIp}:${ifaceName}`;
           if (this.eventLocks.has(lockKey)) continue;
@@ -240,7 +227,7 @@ export class RuleEngine {
 
             if (!existingEvent) {
               const reason = currentState.disabled ? 'interface dimatikan' : 'interface terputus';
-              
+
               await this.models.Event.create({
                 routerName, routerIp,
                 ruleId: RULES.R1.id,

@@ -1,12 +1,9 @@
-import { Op } from "sequelize";
-import { CORR, LIB, SUGGESTION, RULES } from "./library.js";
-
-const corrKey = (routerIp, correlationId) => `${routerIp}:${correlationId}`;
+import { Op } from 'sequelize';
+import { RULES, CORRELATION, CONFIG } from './library.js';
 
 export class CorrelationEngine {
   constructor(models) {
     this.models = models;
-    this.cache = new Map();
     this.interval = null;
   }
 
@@ -18,185 +15,143 @@ export class CorrelationEngine {
   }
 
   stop() {
-    if (this.interval) clearInterval(this.interval);
-    this.interval = null;
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
   }
 
   async evaluateAll() {
     const routers = await this.models.Event.findAll({
-      attributes: ["routerIp"],
-      group: ["routerIp"]
+      attributes: ['routerIp'],
+      group: ['routerIp']
     });
-
     for (const r of routers) {
       await this.evaluateRouter(r.routerIp);
     }
   }
 
   async evaluateRouter(routerIp) {
-    const windowMs = LIB.correlationWindowMs;
-
-    const events = await this.models.Event.findAll({
-      where: {
-        routerIp,
-        status: { [Op.in]: ["active", "cooldown"] }
-      },
-      order: [["startedAt", "ASC"]]
+    const { Event, Indication, IndicationComponent } = this.models;
+    const activeEvents = await Event.findAll({
+      where: { routerIp, status: 'active' }
     });
 
-    const r2 = events.filter(e => e.type === RULES.R2.type);
-    const r3 = events.filter(e => e.type === RULES.R3.type);
-    const r4 = events.filter(e => e.type === RULES.R4.type);
+    const r2Events = activeEvents.filter(e => e.type === RULES.R2.type);
+    const r3Events = activeEvents.filter(e => e.type === RULES.R3.type);
+    const r4Events = activeEvents.filter(e => e.type === RULES.R4.type);
 
-    for (const ev2 of r2) {
-      const t2 = new Date(ev2.startedAt).getTime();
+    const jsonIpCondition = Indication.sequelize.where(
+      Indication.sequelize.json('source_device.ip'),
+      routerIp
+    );
 
-      for (const ev3 of r3) {
-        const t3 = new Date(ev3.startedAt).getTime();
+    const [indicationC1, indicationC2] = await Promise.all([
+      Indication.findOne({
+        where: {
+          correlationId: CORRELATION.C1.id,
+          status: 'active',
+          [Op.and]: jsonIpCondition
+        }
+      }),
+      Indication.findOne({
+        where: {
+          correlationId: CORRELATION.C2.id,
+          status: 'active',
+          [Op.and]: jsonIpCondition
+        }
+      })
+    ]);
 
-        if (Math.abs(t2 - t3) > windowMs) continue;
+    const allC2Events = [...r2Events, ...r3Events, ...r4Events];
+    const hasR2 = r2Events.length > 0;
+    const hasR3 = r3Events.length > 0;
+    const hasR4 = r4Events.length > 0;
 
-        const baseTime = Math.max(t2, t3);
-        const windowEnd = baseTime + windowMs;
+    let c2Valid = false;
+    if (hasR2 && hasR3 && hasR4) {
+      const timestamps = allC2Events.map(e => new Date(e.startedAt).getTime());
+      const range = Math.max(...timestamps) - Math.min(...timestamps);
+      if (range <= CONFIG.correlationWindowMs) {
+        c2Valid = true;
+      }
+    }
 
-        const matchingR4 = r4.find(ev4 => {
-          const t4 = new Date(ev4.startedAt).getTime();
-          return t4 >= baseTime && t4 <= windowEnd;
+    let c1Valid = false;
+    if (hasR2 && hasR3 && !c2Valid) {
+      const c1Events = [...r2Events, ...r3Events];
+      const timestamps = c1Events.map(e => new Date(e.startedAt).getTime());
+      const range = Math.max(...timestamps) - Math.min(...timestamps);
+      if (range <= CONFIG.correlationWindowMs) {
+        c1Valid = true;
+      }
+    }
+
+    if (c2Valid) {
+      const allEvents = [...r2Events, ...r3Events, ...r4Events];
+      if (!indicationC2) {
+        const ind = await Indication.create({
+          source_device: { ip: routerIp },
+          correlationId: CORRELATION.C2.id,
+          indication: CORRELATION.C2.description,
+          recommended_action: CORRELATION.C2.suggestion,
+          status: 'active',
+          startedAt: new Date()
         });
-
-        if (matchingR4) {
-          await this.deleteActive(routerIp, CORR.C1.id);
-          await this.createOrUpdateIndication({
-            routerIp,
-            correlationId: CORR.C2.id,
-            indication: CORR.C2.description,
-            recommended_action: SUGGESTION.C2,
-            events: [ev2, ev3, matchingR4]
-          });
-        } else {
-          const hasC2 = await this.findActive(routerIp, CORR.C2.id);
-          if (!hasC2) {
-            await this.createOrUpdateIndication({
-              routerIp,
-              correlationId: CORR.C1.id,
-              indication: CORR.C1.description,
-              recommended_action: SUGGESTION.C1,
-              events: [ev2, ev3]
-            });
+        for (const ev of allEvents) {
+          await IndicationComponent.create({ indicationId: ind.id, eventId: ev.id });
+        }
+      } else {
+        const existing = await indicationC2.getEvents();
+        const existingIds = new Set(existing.map(e => e.id));
+        for (const ev of allEvents) {
+          if (!existingIds.has(ev.id)) {
+            await IndicationComponent.create({ indicationId: indicationC2.id, eventId: ev.id });
           }
         }
       }
+      if (indicationC1) {
+        await indicationC1.destroy();
+      }
+    } else if (c1Valid) {
+      const allEvents = [...r2Events, ...r3Events];
+      if (!indicationC1) {
+        const ind = await Indication.create({
+          source_device: { ip: routerIp },
+          correlationId: CORRELATION.C1.id,
+          indication: CORRELATION.C1.description,
+          recommended_action: CORRELATION.C1.suggestion,
+          status: 'active',
+          startedAt: new Date()
+        });
+        for (const ev of allEvents) {
+          await IndicationComponent.create({ indicationId: ind.id, eventId: ev.id });
+        }
+      } else {
+        const existing = await indicationC1.getEvents();
+        const existingIds = new Set(existing.map(e => e.id));
+        for (const ev of allEvents) {
+          if (!existingIds.has(ev.id)) {
+            await IndicationComponent.create({ indicationId: indicationC1.id, eventId: ev.id });
+          }
+        }
+      }
+      if (indicationC2) {
+        await indicationC2.destroy();
+      }
+    } else {
+      if (indicationC1) await indicationC1.destroy();
+      if (indicationC2) await indicationC2.destroy();
     }
 
-    const { Indication } = this.models;
-
-    const actives = await Indication.findAll({
-      where: {
-        status: "active",
-        [Op.and]: Indication.sequelize.where(
-          Indication.sequelize.json("source_device.ip"),
-          routerIp
-        )
-      }
+    const activeIndications = await Indication.findAll({
+      where: { status: 'active', [Op.and]: jsonIpCondition }
     });
 
-    for (const ind of actives) {
+    for (const ind of activeIndications) {
       const evs = await ind.getEvents();
-      const allEnded = evs.length && evs.every(e => e.status === "ended");
-      if (allEnded) {
-        await ind.update({
-          status: "ended",
-          endedAt: new Date()
-        });
-        this.cache.delete(corrKey(routerIp, ind.correlationId));
-      }
-    }
-  }
-
-  async findActive(routerIp, correlationId) {
-    const { Indication } = this.models;
-    return Indication.findOne({
-      where: {
-        correlationId,
-        status: "active",
-        [Op.and]: Indication.sequelize.where(
-          Indication.sequelize.json("source_device.ip"),
-          routerIp
-        )
-      }
-    });
-  }
-
-  async deleteActive(routerIp, correlationId) {
-    const { Indication } = this.models;
-    const ind = await Indication.findOne({
-      where: {
-        correlationId,
-        status: "active",
-        [Op.and]: Indication.sequelize.where(
-          Indication.sequelize.json("source_device.ip"),
-          routerIp
-        )
-      }
-    });
-    if (ind) {
-      await ind.destroy();
-      this.cache.delete(corrKey(routerIp, correlationId));
-    }
-  }
-
-  async createOrUpdateIndication({
-    routerIp,
-    correlationId,
-    indication,
-    recommended_action,
-    events
-  }) {
-    const { Indication, IndicationComponent } = this.models;
-    const now = new Date();
-
-    let ind = await Indication.findOne({
-      where: {
-        correlationId,
-        status: "active",
-        [Op.and]: Indication.sequelize.where(
-          Indication.sequelize.json("source_device.ip"),
-          routerIp
-        )
-      }
-    });
-
-    const source_device = { ip: routerIp };
-
-    if (!ind) {
-      ind = await Indication.create({
-        source_device,
-        correlationId,
-        indication,
-        recommended_action,
-        status: "active",
-        startedAt: now
-      });
-
-      for (const ev of events) {
-        await IndicationComponent.create({
-          indicationId: ind.id,
-          eventId: ev.id
-        });
-      }
-
-      return;
-    }
-
-    const existing = await ind.getEvents();
-    const existingIds = new Set(existing.map(e => e.id));
-
-    for (const ev of events) {
-      if (!existingIds.has(ev.id)) {
-        await IndicationComponent.create({
-          indicationId: ind.id,
-          eventId: ev.id
-        });
+      if (evs.length && evs.every(e => e.status === 'ended')) {
+        await ind.update({ status: 'ended', endedAt: new Date() });
       }
     }
   }

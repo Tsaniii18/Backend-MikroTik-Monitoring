@@ -1,7 +1,6 @@
 import { Op } from "sequelize";
-import { LIB } from "../engine/library.js";
+import { CONFIG } from "../engine/library.js";
 import {
-  bps,
   pushWindow,
   safeJson,
   parseTimeMs,
@@ -19,7 +18,7 @@ export class Poller {
     this.models = models;
     this.io = io;
     this.state = state;
-    this.timers = [];
+    this.isRunning = false;
     this.windows = {
       cpu: [],
       memory: [],
@@ -29,29 +28,39 @@ export class Poller {
     this.ifacePrev = new Map();
   }
 
-  stop() {
-    for (const t of this.timers) clearInterval(t);
-    this.timers = [];
+  async stop() {
+    this.isRunning = false;
+    // Wait for current loop iteration to finish gracefully
+    if (this.loopPromise) {
+      await this.loopPromise;
+      this.loopPromise = null;
+    }
     this.windows = { cpu: [], memory: [], delay: [], packetLoss: [] };
     this.ifacePrev.clear();
   }
 
   start() {
-    this.stop();
-    this.timers.push(
-      setInterval(
-        () => this.pollResource().catch(() => null),
-        LIB.windows.cpu.intervalMs,
-      ),
-      setInterval(
-        () => this.pollPing().catch(() => null),
-        LIB.windows.ping.intervalMs,
-      ),
-      setInterval(
-        () => this.pollInterfaces().catch(() => null),
-        LIB.interfaceIntervalMs,
-      ),
-    );
+    this.stop().then(() => {
+      this.isRunning = true;
+      this.loopPromise = this.runLoop();
+    });
+  }
+
+  async runLoop() {
+    while (this.isRunning) {
+      const start = Date.now();
+      
+      // Run all polling tasks sequentially
+      await this.pollResource();
+      await this.pollPing();
+      await this.pollInterfaces();
+      
+      const elapsed = Date.now() - start;
+      const delay = Math.max(0, CONFIG.pollingIntervalMs - elapsed);
+      if (delay > 0 && this.isRunning) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
   }
 
   getWindowData(windowName, sinceTimestamp) {
@@ -74,7 +83,7 @@ export class Poller {
     pushWindow(
       this.windows.cpu,
       { ts: timestamp, loadPct: Number(cpuLoad.toFixed(2)) },
-      LIB.windows.cpu.max,
+      CONFIG.windowsLength,
     );
     pushWindow(
       this.windows.memory,
@@ -85,15 +94,17 @@ export class Poller {
         usedMem: Number(usedMem.toFixed(2)),
         usedMemPct: Number(usedMemPct.toFixed(2)),
       },
-      LIB.windows.cpu.max,
+      CONFIG.windowsLength,
     );
     this.state.dynamic.uptime = uptime;
 
+    const cpuStats = windowStats(this.windows.cpu, "loadPct");
     if (this.ruleEngine) {
       await this.ruleEngine.onCpuData(
         this.state.router.name,
         this.state.router.ip,
-        { value: cpuLoad, timestamp },
+        cpuStats,
+        timestamp,
       );
     }
     await this.emitSnapshot();
@@ -106,7 +117,7 @@ export class Poller {
     const sentVals = raw.map(r => Number(r?.sent)).filter(Number.isFinite);
     const receivedVals = raw.map(r => Number(r?.received)).filter(Number.isFinite);
     const packetSent = sentVals.length ? Math.max(...sentVals) : 0;
-    const packetReceive = receivedVals.length ? Math.max(...receivedVals) : 0;
+    const packetReceived = receivedVals.length ? Math.max(...receivedVals) : 0;
     const times = raw.map(r => r?.time).filter(t => t != null);
     const delayMsArray = (times || [])
       .map((t) => parseTimeMs(t))
@@ -118,47 +129,33 @@ export class Poller {
     pushWindow(
       this.windows.delay,
       { ts: timestamp, avgMs: Number(avgDelayMs.toFixed(2)) },
-      LIB.windows.ping.max,
+      CONFIG.windowsLength,
     );
     pushWindow(
       this.windows.packetLoss,
       {
         ts: timestamp,
         packetSent,
-        packetReceive,
+        packetReceived,
       },
-      LIB.windows.ping.max,
+      CONFIG.windowsLength,
     );
 
+    const delayStats = windowStats(this.windows.delay, "avgMs");
     const plStats = windowStatsPacketLoss(this.windows.packetLoss);
 
     if (this.ruleEngine) {
-      await this.ruleEngine.onLatencyData(
+      await this.ruleEngine.onDelayData(
         this.state.router.name,
         this.state.router.ip,
-        {
-          avgMs: Number(avgDelayMs.toFixed(2)),
-          minMs: delayMsArray.length
-            ? Number(Math.min(...delayMsArray).toFixed(2))
-            : 0,
-          maxMs: delayMsArray.length
-            ? Number(Math.max(...delayMsArray).toFixed(2))
-            : 0,
-          timestamp,
-        },
+        delayStats,
+        timestamp,
       );
       await this.ruleEngine.onPacketLossData(
         this.state.router.name,
         this.state.router.ip,
-        {
-          lossPct: packetSent
-            ? ((packetSent - packetReceive) / packetSent) * 100
-            : 0,
-          sent: packetSent,
-          received: packetReceive,
-          timestamp,
-          windowStats: plStats,
-        },
+        plStats,
+        timestamp,
       );
     }
     await this.emitSnapshot();

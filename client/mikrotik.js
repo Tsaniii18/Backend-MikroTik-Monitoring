@@ -22,32 +22,29 @@ export class MikroTikClient {
   }
 
   async getIdentity() {
-    // ambil data identitas perangkat
     const { data: identity } = await this.http.get("/system/identity");
-
-    // ambil data resource perangkat
     const { data: resource } = await this.http.get("/system/resource");
 
     return {
-      name: identity?.name, // nama perangkat
-      version: resource?.version, // versi RouterOS
-      platform: resource?.platform, // platform perangkat
-      cpu: resource?.cpu, // tipe CPU
-      cpu_count: Number(resource?.["cpu-count"]), // jumlah core CPU
-      architecture_name: resource?.["architecture-name"], // arsitektur
-      total_memory: Number(resource?.["total-memory"]), // total memori (byte)
-      board_name: resource?.["board-name"], // nama board
+      name: identity?.name, 
+      version: resource?.version, 
+      platform: resource?.platform, 
+      cpu: resource?.cpu, 
+      cpu_count: Number(resource?.["cpu-count"]), 
+      architecture_name: resource?.["architecture-name"], 
+      total_memory: Number(resource?.["total-memory"]), 
+      board_name: resource?.["board-name"], 
     };
   }
 
   async getResource() {
-    const { data } = await this.http.get("/system/resource"); // request resource
+    const { data } = await this.http.get("/system/resource");
 
     return {
-      "cpu-load": data?.["cpu-load"], // CPU load
-      "total-memory": data?.["total-memory"], // total memory
-      "free-memory": data?.["free-memory"], // free memory
-      uptime: data?.uptime // uptime perangkat
+      "cpu-load": data?.["cpu-load"], 
+      "total-memory": data?.["total-memory"],
+      "free-memory": data?.["free-memory"],
+      uptime: data?.uptime
     };
   }
 
@@ -75,9 +72,12 @@ export class MikroTikClient {
   async topCpuTasks(duration = 3) {
     const { data } = await this.http.post("/tool/profile", { duration: `${duration}s` });
     const rows = Array.isArray(data) ? data : [];
-    return rows.map(r => ({
-      name: r?.name,
-      usage: r?.usage
-    }));
+    return rows
+      .map(r => ({
+        name: r?.name,
+        usage: Number(r?.usage) || 0
+      }))
+      .sort((a, b) => b.usage - a.usage)
+      .slice(0, 5);
   }
 }

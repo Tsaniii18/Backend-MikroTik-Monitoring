@@ -1,5 +1,3 @@
-export const nowWibIso = () => new Date().toISOString();
-
 export const clampWindow = (arr, max) => {
   if (arr.length > max) arr.splice(0, arr.length - max);
   return arr;
@@ -8,20 +6,6 @@ export const clampWindow = (arr, max) => {
 export const pushWindow = (arr, item, max) => {
   arr.push(item);
   return clampWindow(arr, max);
-};
-
-export const avg = (arr) => {
-  if (!arr.length) return 0;
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
-};
-
-export const min = (arr) => (arr.length ? Math.min(...arr) : 0);
-export const max = (arr) => (arr.length ? Math.max(...arr) : 0);
-
-
-export const bps = (deltaBytes, deltaMs) => {
-  if (!Number.isFinite(deltaBytes) || !Number.isFinite(deltaMs) || deltaMs <= 0) return 0;
-  return (deltaBytes * 8) / (deltaMs / 1000);
 };
 
 export const safeJson = (v) => {
@@ -99,13 +83,14 @@ export const windowStats = (windowArray, key) => {
 };
 
 export const windowStatsPacketLoss = (window) => {
+  const count = window.length;
   const totalSent = window.reduce((sum, w) => {
     const v = Number(w?.packetSent);
     return sum + (Number.isFinite(v) ? v : 0);
   }, 0);
 
   const totalReceived = window.reduce((sum, w) => {
-    const v = Number(w?.packetReceive);
+    const v = Number(w?.packetReceived);
     return sum + (Number.isFinite(v) ? v : 0);
   }, 0);
 
@@ -116,6 +101,7 @@ export const windowStatsPacketLoss = (window) => {
     : 0;
 
   return {
+    count,
     totalSent,
     totalReceived,
     totalLoss,
